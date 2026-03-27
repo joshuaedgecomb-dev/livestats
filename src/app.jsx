@@ -95,6 +95,86 @@ function findCol(row, ...candidates) {
   return "";
 }
 
+// ── CSV parser ───────────────────────────────────────────────────────────────
+function parseCSV(text) {
+  // Strip UTF-8 BOM if present
+  const clean = text.replace(/^\uFEFF/, "").trim();
+  const lines = clean.split(/\r?\n/);
+  if (lines.length < 2) return [];
+  const headers = lines[0].split(",").map(h => h.trim().replace(/^"|"$/g, ""));
+  return lines.slice(1).filter(l => l.trim()).map(line => {
+    const vals = [];
+    let inQ = false, cur = "";
+    for (const ch of line + ",") {
+      if (ch === '"') { inQ = !inQ; }
+      else if (ch === "," && !inQ) { vals.push(cur.trim()); cur = ""; }
+      else cur += ch;
+    }
+    const row = {};
+    headers.forEach((h, i) => { row[h] = (vals[i] || "").replace(/^"|"$/g, "").trim(); });
+    return row;
+  });
+}
+
+// ── Goal lookup builder ──────────────────────────────────────────────────────
+function buildGoalLookup(goalsRows) {
+  if (!goalsRows) return null;
+  const byTA      = {};   // { [targetAudience]: { [site]: [row, ...] } }
+  const byProject = {};   // { [project]: [targetAudience, ...] } — for fuzzy program matching
+  const byROC     = {};   // { [rocCode]: { [site]: [row, ...] } } — direct code matching
+  const byTarget  = {};   // { [fullTargetName]: { [site]: [row, ...] } } — preserves NAT/HQ distinction
+
+  goalsRows.forEach(row => {
+    const ta      = (findCol(row, "Target Audience", "Target") || "").trim();
+    const target  = (findCol(row, "Target") || "").trim(); // full name like "NAT MAR NS Acquisition WRNS"
+    const site    = (findCol(row, "Site") || "").trim().toUpperCase();
+    const project = (findCol(row, "Project", "Initiative", "Campaign Type") || "").trim();
+    const rocRaw  = (findCol(row, "ROC Numbers", "ROC Number", "ROC", "ROC Code", "GL Code") || "").trim().toUpperCase();
+    const funding = (findCol(row, "Funding") || "").trim();
+    const rocCodes = rocRaw ? rocRaw.split(/[,;\s]+/).map(s => s.trim()).filter(Boolean) : [];
+    if (!ta || !site) return;
+
+    // Attach funding and full target name to each row for display
+    row._funding = funding;
+    row._target = target;
+    row._roc = rocCodes[0] || "";
+
+    // Index by Target Audience
+    if (!byTA[ta]) byTA[ta] = {};
+    if (!byTA[ta][site]) byTA[ta][site] = [];
+    byTA[ta][site].push(row);
+
+    // Index by full Target name (preserves NAT vs HQ)
+    if (target) {
+      if (!byTarget[target]) byTarget[target] = {};
+      if (!byTarget[target][site]) byTarget[target][site] = [];
+      byTarget[target][site].push(row);
+    }
+
+    // Index by each ROC code
+    rocCodes.forEach(roc => {
+      if (!byROC[roc]) byROC[roc] = {};
+      if (!byROC[roc][site]) byROC[roc][site] = [];
+      byROC[roc][site].push(row);
+    });
+
+    // Secondary index by Project — tracks which TAs belong to each project
+    if (project) {
+      if (!byProject[project]) byProject[project] = new Set();
+      byProject[project].add(ta);
+    }
+  });
+
+  // Convert Sets to arrays
+  Object.keys(byProject).forEach(k => { byProject[k] = [...byProject[k]]; });
+
+  return { byTA, byProject, byROC, byTarget };
+}
+
+// Get all goal entries (by Target Audience) that match a job type.
+// First tries an exact TA match, then a project-level match (e.g. "Add XM" → AAL + XM Likely).
+// Returns [{ targetAudience, siteMap }, ...] — always an array.
+
 // ── Goal helpers ─────────────────────────────────────────────────────────────
 function getGoalEntries(goalLookup, jobType, rocCode) {
   if (!goalLookup) return [];
@@ -2300,6 +2380,25 @@ const THEMES = {
 // ── App Shell (LiveStats standalone) ─────────────────────────────────────────
 export default function App() {
   const [lightMode, setLightMode] = useState(true);
+  const [goalsRaw, setGoalsRaw] = useState(null);
+
+  // Auto-load goals from Google Sheet
+  useEffect(() => {
+    (async () => {
+      try {
+        const proxyUrl = url => "https://corsproxy.io/?" + encodeURIComponent(url);
+        let res;
+        try { res = await fetch(DEFAULT_GOALS_SHEET_URL); } catch(e) { res = null; }
+        if (!res || !res.ok) res = await fetch(proxyUrl(DEFAULT_GOALS_SHEET_URL));
+        if (res.ok) {
+          const rows = parseCSV(await res.text());
+          if (rows.length > 0) setGoalsRaw(rows);
+        }
+      } catch(e) { /* silent */ }
+    })();
+  }, []);
+
+  const goalLookup = useMemo(() => buildGoalLookup(goalsRaw), [goalsRaw]);
 
   useEffect(() => {
     const vars = lightMode ? THEMES.light : THEMES.dark;
@@ -2320,7 +2419,7 @@ export default function App() {
         </button>
       </div>
       <div style={{ paddingTop: "42px" }}>
-        <TodayView recentAgentNames={new Set()} historicalAgentMap={{}} goalLookup={null} />
+        <TodayView recentAgentNames={new Set()} historicalAgentMap={{}} goalLookup={goalLookup} />
       </div>
     </div>
   );

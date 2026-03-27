@@ -33,8 +33,18 @@ const normKeyStart = find(/^function normKey/);
 const findColEnd = find(/^$/, find(/^function findCol/, normKeyStart));
 const normKeyBlock = slice(normKeyStart, findColEnd);
 
+// 2c. parseCSV (lines ~26-43)
+const parseCsvStart = find(/^function parseCSV/);
+const parseCsvEnd = find(/^$/, parseCsvStart + 1);
+const parseCsvBlock = slice(parseCsvStart, parseCsvEnd);
+
+// 2d. buildGoalLookup (lines ~786-842)
+const bglStart = find(/^function buildGoalLookup/);
+const bglEnd = find(/^function getGoalEntries/);
+const bglBlock = slice(bglStart, bglEnd);
+
 // 3. getGoalEntries (lines ~843-920)
-const ggeStart = find(/^function getGoalEntries/);
+const ggeStart = bglEnd;
 const ggeEnd = find(/^function computePlanRow/);
 const ggeBlock = slice(ggeStart, ggeEnd);
 
@@ -76,6 +86,12 @@ ${rtsBlock}
 // ── Key normalization + column finder ────────────────────────────────────────
 ${normKeyBlock}
 
+// ── CSV parser ───────────────────────────────────────────────────────────────
+${parseCsvBlock}
+
+// ── Goal lookup builder ──────────────────────────────────────────────────────
+${bglBlock}
+
 // ── Goal helpers ─────────────────────────────────────────────────────────────
 ${ggeBlock}
 ${cprBlock}
@@ -95,6 +111,25 @@ ${themesBlock}
 // ── App Shell (LiveStats standalone) ─────────────────────────────────────────
 export default function App() {
   const [lightMode, setLightMode] = useState(true);
+  const [goalsRaw, setGoalsRaw] = useState(null);
+
+  // Auto-load goals from Google Sheet
+  useEffect(() => {
+    (async () => {
+      try {
+        const proxyUrl = url => "https://corsproxy.io/?" + encodeURIComponent(url);
+        let res;
+        try { res = await fetch(DEFAULT_GOALS_SHEET_URL); } catch(e) { res = null; }
+        if (!res || !res.ok) res = await fetch(proxyUrl(DEFAULT_GOALS_SHEET_URL));
+        if (res.ok) {
+          const rows = parseCSV(await res.text());
+          if (rows.length > 0) setGoalsRaw(rows);
+        }
+      } catch(e) { /* silent */ }
+    })();
+  }, []);
+
+  const goalLookup = useMemo(() => buildGoalLookup(goalsRaw), [goalsRaw]);
 
   useEffect(() => {
     const vars = lightMode ? THEMES.light : THEMES.dark;
@@ -115,7 +150,7 @@ export default function App() {
         </button>
       </div>
       <div style={{ paddingTop: "42px" }}>
-        <TodayView recentAgentNames={new Set()} historicalAgentMap={{}} goalLookup={null} />
+        <TodayView recentAgentNames={new Set()} historicalAgentMap={{}} goalLookup={goalLookup} />
       </div>
     </div>
   );
