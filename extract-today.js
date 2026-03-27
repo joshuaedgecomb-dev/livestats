@@ -18,15 +18,20 @@ const find = (pattern, after = 0) => {
 
 const slice = (from, to) => lines.slice(from, to).join("\n");
 
-// 1. Q constant + attainColor (lines ~70-82)
-const qStart = find(/^const Q = \{/);
-const attainEnd = find(/^$/, find(/^function attainColor/, qStart)); // blank line after attainColor
-const qBlock = slice(qStart, attainEnd);
+// 1. Utility functions: parsePct through attainColor (lines ~46-82)
+const utilStart = find(/^function parsePct/);
+const attainEnd = find(/^$/, find(/^function attainColor/, utilStart));
+const utilBlock = slice(utilStart, attainEnd);
 
 // 2. REGION_TO_SITE + VALID_REGIONS (lines ~388-412)
 const rtsStart = find(/^const REGION_TO_SITE/);
 const vrLine = find(/^const VALID_REGIONS/, rtsStart);
 const rtsBlock = slice(rtsStart, vrLine + 1);
+
+// 2b. normKey, compactKey, rowKeyMap, findCol (lines ~759-784)
+const normKeyStart = find(/^function normKey/);
+const findColEnd = find(/^$/, find(/^function findCol/, normKeyStart));
+const normKeyBlock = slice(normKeyStart, findColEnd);
 
 // 3. getGoalEntries (lines ~843-920)
 const ggeStart = find(/^function getGoalEntries/);
@@ -35,7 +40,7 @@ const ggeBlock = slice(ggeStart, ggeEnd);
 
 // 4. computePlanRow (lines ~923-935)
 const cprStart = ggeEnd;
-const cprEnd = find(/^function /, cprStart + 1); // next function after computePlanRow
+const cprEnd = find(/^function /, cprStart + 1);
 const cprBlock = slice(cprStart, cprEnd);
 
 // 5. OTM_URL through deriveHsdXm (lines ~8483-8607)
@@ -62,11 +67,14 @@ const themesBlock = slice(themesConst, appStart);
 const output = `import React from "react";
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 
-// ── Quartile colors + attainColor ────────────────────────────────────────────
-${qBlock}
+// ── Utilities ────────────────────────────────────────────────────────────────
+${utilBlock}
 
 // ── Region mapping ───────────────────────────────────────────────────────────
 ${rtsBlock}
+
+// ── Key normalization + column finder ────────────────────────────────────────
+${normKeyBlock}
 
 // ── Goal helpers ─────────────────────────────────────────────────────────────
 ${ggeBlock}
@@ -116,8 +124,9 @@ export default function App() {
 
 writeFileSync(out, output, "utf-8");
 console.log("Extracted standalone app to " + out);
-console.log("  Q + attainColor: " + qBlock.split("\n").length + " lines");
+console.log("  Utilities: " + utilBlock.split("\n").length + " lines");
 console.log("  Region mapping: " + rtsBlock.split("\n").length + " lines");
+console.log("  normKey/findCol: " + normKeyBlock.split("\n").length + " lines");
 console.log("  getGoalEntries: " + ggeBlock.split("\n").length + " lines");
 console.log("  computePlanRow: " + cprBlock.split("\n").length + " lines");
 console.log("  OTM helpers: " + otmBlock.split("\n").length + " lines");

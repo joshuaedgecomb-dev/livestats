@@ -1,7 +1,31 @@
 import React from "react";
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 
-// ── Quartile colors + attainColor ────────────────────────────────────────────
+// ── Utilities ────────────────────────────────────────────────────────────────
+function parsePct(val) {
+  const n = parseFloat(String(val || "0").replace(/%/g, "").trim());
+  return isNaN(n) ? 0 : n;
+}
+function parseNum(val) {
+  const n = parseFloat(String(val || "0").replace(/[,%$]/g, "").trim());
+  return isNaN(n) ? 0 : n;
+}
+function fmt(n, dec = 1) { return Number(n).toFixed(dec); }
+function fmtPct(n) { return fmt(n, 1) + "%"; }
+function fmtGoal(val, fmtType) {
+  if (val === null || val === undefined || isNaN(val)) return "—";
+  if (fmtType === "dec2") return Number(val).toFixed(2);
+  if (fmtType === "pct")  return Number(val).toFixed(1) + "%";
+  return Math.round(val).toLocaleString();
+}
+
+function getQuartile(pctToGoal) {
+  if (pctToGoal >= 100) return "Q1";
+  if (pctToGoal >= 80)  return "Q2";
+  if (pctToGoal > 0)    return "Q3";
+  return "Q4";
+}
+
 const Q = {
   Q1: { color: "#16a34a", glow: "#16a34a33", label: "100%+ to Goal",    badge: "EXCEEDING",   icon: "▲" },
   Q2: { color: "#2563eb", glow: "#2563eb33", label: "80–99.9% to Goal",  badge: "NEAR GOAL",   icon: "◆" },
@@ -42,6 +66,34 @@ const DEFAULT_PRIOR_GOALS_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/
 // ══════════════════════════════════════════════════════════════════════════════
 
 const VALID_REGIONS = new Set(["SD-Xfinity", "Belize City-XOTM", "OW-XOTM", "San Ignacio-XOTM"]);
+
+// ── Key normalization + column finder ────────────────────────────────────────
+function normKey(s) {
+  return String(s || "").toLowerCase().replace(/[\s_\-\/]+/g, " ").trim();
+}
+
+// Ultra-compact: strip ALL whitespace/separators for tightest fuzzy match
+// "Non-Sub" → "nonsub", "Nonsub" → "nonsub", "Non Sub" → "nonsub"
+function compactKey(s) {
+  return String(s || "").toLowerCase().replace(/[\s_\-\/]+/g, "").trim();
+}
+
+// Build a normalized key → original key map for a row (computed once per row)
+function rowKeyMap(row) {
+  const map = {};
+  Object.keys(row).forEach(k => { map[normKey(k)] = k; });
+  return map;
+}
+
+// Find a value from a row by trying multiple candidate names (case/space insensitive)
+function findCol(row, ...candidates) {
+  const km = rowKeyMap(row);
+  for (const c of candidates) {
+    const orig = km[normKey(c)];
+    if (orig !== undefined && row[orig] !== undefined && row[orig] !== "") return row[orig];
+  }
+  return "";
+}
 
 // ── Goal helpers ─────────────────────────────────────────────────────────────
 function getGoalEntries(goalLookup, jobType, rocCode) {
