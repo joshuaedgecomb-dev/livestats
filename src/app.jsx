@@ -1,7 +1,22 @@
 import React from "react";
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 
-// ── Constants ────────────────────────────────────────────────────────────────
+// ── Quartile colors + attainColor ────────────────────────────────────────────
+const Q = {
+  Q1: { color: "#16a34a", glow: "#16a34a33", label: "100%+ to Goal",    badge: "EXCEEDING",   icon: "▲" },
+  Q2: { color: "#2563eb", glow: "#2563eb33", label: "80–99.9% to Goal",  badge: "NEAR GOAL",   icon: "◆" },
+  Q3: { color: "#d97706", glow: "#d9770633", label: "1–79.9% to Goal",   badge: "BELOW GOAL",  icon: "●" },
+  Q4: { color: "#dc2626", glow: "#dc262633", label: "0% to Goal",         badge: "NO ACTIVITY", icon: "■" },
+};
+
+function attainColor(pct) {
+  if (pct >= 100) return Q.Q1.color;
+  if (pct >= 80)  return Q.Q2.color;
+  if (pct > 0)    return Q.Q3.color;
+  return Q.Q4.color;
+}
+
+// ── Region mapping ───────────────────────────────────────────────────────────
 const REGION_TO_SITE = {
   "SD-Xfinity":        "DR",
   "Belize City-XOTM":  "BZ",
@@ -28,6 +43,104 @@ const DEFAULT_PRIOR_GOALS_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/
 
 const VALID_REGIONS = new Set(["SD-Xfinity", "Belize City-XOTM", "OW-XOTM", "San Ignacio-XOTM"]);
 
+// ── Goal helpers ─────────────────────────────────────────────────────────────
+function getGoalEntries(goalLookup, jobType, rocCode) {
+  if (!goalLookup) return [];
+  const { byTA, byProject, byROC } = goalLookup;
+
+  // 0. Direct ROC code match (highest priority — 1:1 key match)
+  if (rocCode && byROC) {
+    const roc = rocCode.trim().toUpperCase();
+    if (byROC[roc]) return [{ targetAudience: rocCode, siteMap: byROC[roc] }];
+  }
+
+  // 1. Exact match on Target Audience
+  if (byTA[jobType]) return [{ targetAudience: jobType, siteMap: byTA[jobType] }];
+
+  // 2. Normalized match on Target Audience (collapse spaces/hyphens but keep words separate)
+  const normJT = normKey(jobType);
+  const normMatch = Object.keys(byTA).find(ta => normKey(ta) === normJT);
+  if (normMatch) return [{ targetAudience: normMatch, siteMap: byTA[normMatch] }];
+
+  // 3. Compact match on Target Audience (strip ALL separators: "Non-Sub" == "Nonsub")
+  const compJT = compactKey(jobType);
+  const compMatch = Object.keys(byTA).find(ta => compactKey(ta) === compJT);
+  if (compMatch) return [{ targetAudience: compMatch, siteMap: byTA[compMatch] }];
+
+  // 4. Fuzzy: check if jobType matches any Project key (normalize both)
+  const matchedProject = Object.keys(byProject).find(p => normKey(p) === normJT);
+  if (matchedProject) {
+    return byProject[matchedProject].map(ta => ({ targetAudience: ta, siteMap: byTA[ta] }));
+  }
+  // Also try compact key on Project
+  const compProject = Object.keys(byProject).find(p => compactKey(p) === compJT);
+  if (compProject) {
+    return byProject[compProject].map(ta => ({ targetAudience: ta, siteMap: byTA[ta] }));
+  }
+
+  // 5. Fuzzy: check if any TA contains the jobType (or vice versa) via normKey
+  //    Require the shorter string to be at least 5 chars and match at a word boundary
+  const fuzzyTAs = Object.keys(byTA).filter(ta => {
+    const nta = normKey(ta);
+    if (nta === normJT) return false; // already checked in step 2
+    const shorter = nta.length < normJT.length ? nta : normJT;
+    const longer = nta.length < normJT.length ? normJT : nta;
+    if (shorter.length < 5) return false;
+    // Check word-boundary match: shorter must start at a word boundary in longer
+    const idx = longer.indexOf(shorter);
+    if (idx === -1) return false;
+    const before = idx === 0 || longer[idx - 1] === " ";
+    const after = idx + shorter.length >= longer.length || longer[idx + shorter.length] === " ";
+    return before || after;
+  });
+  if (fuzzyTAs.length > 0) {
+    return fuzzyTAs.map(ta => ({ targetAudience: ta, siteMap: byTA[ta] }));
+  }
+
+  // 6. Last resort: compact includes (strips all separators then checks substring)
+  const compactFuzzy = Object.keys(byTA).filter(ta =>
+    compactKey(ta).includes(compJT) || compJT.includes(compactKey(ta))
+  );
+  if (compactFuzzy.length > 0) {
+    return compactFuzzy.map(ta => ({ targetAudience: ta, siteMap: byTA[ta] }));
+  }
+
+  // 7. Word overlap: match if 70%+ of the job type's significant words appear in the target name
+  //    Handles cases like "MAR Acquisition WRNS" matching "NAT MAR NS Acquisition WRNS"
+  const jtWords = normJT.split(/\s+/).filter(w => w.length > 2);
+  if (jtWords.length >= 2) {
+    const wordOverlap = Object.keys(byTA).filter(ta => {
+      const taWords = normKey(ta).split(/\s+/).filter(w => w.length > 2);
+      if (taWords.length < 2) return false;
+      const common = jtWords.filter(w => taWords.some(tw => tw.includes(w) || w.includes(tw)));
+      return common.length >= Math.min(jtWords.length, taWords.length) * 0.7 && common.length >= 2;
+    });
+    if (wordOverlap.length > 0) {
+      return wordOverlap.map(ta => ({ targetAudience: ta, siteMap: byTA[ta] }));
+    }
+  }
+
+  return [];
+}
+
+// ── Core plan computation from a single goals CSV row ─────────────────────────
+function computePlanRow(row) {
+  return {
+    homesGoal: Math.ceil(parseNum(findCol(row, "HOMES GOAL", "Homes Goal", "Home Goal", "Homes"))),
+    rguGoal:   Math.ceil(parseNum(findCol(row, "RGU GOAL", "RGU Goal", "RGU"))),
+    // Integer GOAL columns must come BEFORE the "Sell In Goal" percentage columns
+    hsdGoal:   Math.ceil(parseNum(findCol(row, "HSD GOAL", "HSD Goal", "HSD Sell In Goal", "New XI Goal"))),
+    xmGoal:    Math.ceil(parseNum(findCol(row, "XM GOAL",  "XM Goal",  "XM Sell In Goal",  "XM Lines Goal"))),
+    videoGoal: Math.ceil(parseNum(findCol(row, "VIDEO GOAL", "Video Goal", "Video Sell In Goal", "New Video Goal"))),
+    xhGoal:    Math.ceil(parseNum(findCol(row, "XH GOAL",  "XH Goal",  "XH Sell In Goal",  "New XH Goal"))),
+    hoursGoal: Math.ceil(parseNum(findCol(row, "Hours Goal", "HOURS GOAL", "Hour Goal"))),
+    sphGoal:   parseNum(findCol(row, "SPH GOAL", "SPH Goal", "SPH")),
+  };
+}
+
+// Returns every row for a siteMap as a flat array (all sites, all rows)
+
+// ── OTM constants + helpers ──────────────────────────────────────────────────
 const OTM_URL  = "https://smart-gcs.com/otm2/JSON/get/OTM.php?grp=1&job=1&loc=1&reg=1&sup=0&agt=1&dir=0";
 const CODE_URL = "https://smart-gcs.com/otm2/JSON/get/Code.php";
 // Product codes that count as "goals" from Code.php
@@ -154,7 +267,8 @@ const deriveHsdXm = (products) => ({
   xml: Number(products[NEW_MOBILE_CODE]) || 0,
 });
 
-// ── Components ───────────────────────────────────────────────────────────────
+
+// ── TVMode ───────────────────────────────────────────────────────────────────
 // ── TVMode — Screensaver for TV displays ─────────────────────────────────────
 // Full-screen auto-rotating view using current theme, site filter, campaign comparison.
 function TVMode({ d, codes, doFetch, lastRefresh, onExit }) {
@@ -432,6 +546,8 @@ function TVMode({ d, codes, doFetch, lastRefresh, onExit }) {
   );
 }
 
+
+// ── TodayView ────────────────────────────────────────────────────────────────
 function TodayView({ recentAgentNames, historicalAgentMap, goalLookup }) {
   const [raw,         setRaw]         = useState(() => {
     try {
@@ -1790,7 +1906,6 @@ function TodayView({ recentAgentNames, historicalAgentMap, goalLookup }) {
 // ══════════════════════════════════════════════════════════════════════════════
 // SECTION 14 — APP SHELL  (App.jsx)
 // Owns state. Calls usePerformanceEngine. Passes data to pages. No computation.
-// ══════════════════════════════════════════════════════════════════════════════
 
 // ── Theme ────────────────────────────────────────────────────────────────────
 const THEMES = {
@@ -1858,7 +1973,6 @@ export default function App() {
 
   return (
     <div style={{ minHeight: "100vh", background: "var(--bg-primary)", color: "var(--text-primary)" }}>
-      {/* Minimal top bar */}
       <div style={{ position: "fixed", top: 0, left: 0, right: 0, zIndex: 200, background: "var(--nav-bg)", backdropFilter: "blur(16px) saturate(180%)", WebkitBackdropFilter: "blur(16px) saturate(180%)", borderBottom: "1px solid var(--glass-border)", padding: "0.6rem 1.5rem", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <span style={{ fontFamily: "var(--font-ui, Inter, sans-serif)", fontSize: "0.78rem", color: "var(--text-dim)", letterSpacing: "0.08em", fontWeight: 500 }}>
           LIVESTATS
